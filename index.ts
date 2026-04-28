@@ -12,8 +12,10 @@ console.info = console.error;
 console.warn = console.error;
 
 // --- TRAILING STOP STATE MANAGEMENT (MONGODB) ---
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://dbRoot:luuuLzdXZXXbamnz@cluster0.x28vill.mongodb.net/?appName=Cluster0";
+const MONGO_URI = process.env.MONGO_URI || "";
 const DB_NAME = "mcp_trailing_stop_db";
+const API_KEY = process.env.API_KEY || "";
+const SECRET = process.env.SECRET || "";
 
 let db: Db;
 let trailingStopsCollection: Collection<TrailingStopConfig>;
@@ -64,14 +66,12 @@ server.registerTool('indodax-ccxt', {
   inputSchema: {
     method: z.string().describe("Nama method CCXT yang ingin dipanggil (contoh: 'fetchTicker', 'fetchBalance', 'fetchOpenOrders')"),
     args: z.array(z.any()).optional().describe("Daftar argumen sesuai urutan method CCXT. Contoh untuk fetchTicker: ['BTC/IDR']"),
-    apiKey: z.string().optional().describe("API Key Indodax (wajib untuk private endpoint)"),
-    secret: z.string().optional().describe("API Secret Indodax (wajib untuk private endpoint)")
   },
-}, async ({ method, args, apiKey, secret }) => {
+}, async ({ method, args }) => {
   try {
     const exchange = new ccxt.indodax({
-      ...(apiKey ? { apiKey } : {}),
-      ...(secret ? { secret } : {}),
+      apiKey: API_KEY,
+      secret: SECRET,
       enableRateLimit: true,
       sandbox: false
     });
@@ -108,8 +108,6 @@ server.registerTool('manage_trailing_stop', {
         amount: z.number().describe("Jumlah aset yang akan dibeli/dijual"),
         trailingPercentage: z.number().describe("Jarak persentase trailing (contoh: 2 untuk 2%)"),
         activationPrice: z.number().optional().describe("Harga aktivasi untuk memulai trailing (opsional, jika kosong langsung aktif)"),
-        apiKey: z.string().describe("API Key Indodax"),
-        secret: z.string().describe("Secret Key Indodax")
       })
     }),
     z.object({
@@ -138,15 +136,15 @@ server.registerTool('manage_trailing_stop', {
         amount: payload.amount,
         trailingPercentage: payload.trailingPercentage,
         ...(payload.activationPrice !== undefined ? { activationPrice: payload.activationPrice } : {}),
-        apiKey: payload.apiKey,
-        secret: payload.secret,
+        apiKey: API_KEY,
+        secret: SECRET,
         active: payload.activationPrice === undefined,
       };
       
       await trailingStopsCollection.insertOne(newStop as any);
       
       return {
-        content: [{ type: "text", text: `Trailing Stop berhasil dibuat dengan ID: ${id}\n\nDetail:\n${JSON.stringify({ ...newStop, apiKey: '***', secret: '***' }, null, 2)}` }]
+        content: [{ type: "text", text: `Trailing Stop berhasil dibuat dengan ID: ${id}\n\nDetail:\n${JSON.stringify({ ...newStop }, null, 2)}` }]
       };
     }
 
@@ -154,7 +152,7 @@ server.registerTool('manage_trailing_stop', {
       const stops = await trailingStopsCollection.find({}).toArray();
       const safeStops = stops.map(s => {
         const { _id, ...rest } = s as any;
-        return { ...rest, apiKey: '***', secret: '***' };
+        return { ...rest };
       });
       return {
         content: [{ type: "text", text: safeStops.length > 0 ? JSON.stringify(safeStops, null, 2) : "Tidak ada trailing stop aktif." }]
@@ -235,7 +233,7 @@ async function startTrailingStopWorker() {
             if (currentPrice <= triggerPrice) {
               console.error(`[Trailing Worker] EXECUTED SELL untuk ID ${stop.id} di ${currentPrice} (Highest: ${stop.highestPrice}, Drop: ${stop.trailingPercentage}%)`);
               try {
-                const privateExchange = new ccxt.indodax({ apiKey: stop.apiKey, secret: stop.secret, enableRateLimit: true });
+                const privateExchange = new ccxt.indodax({ apiKey: API_KEY, secret: SECRET, enableRateLimit: true });
                 await privateExchange.createOrder(stop.symbol, 'market', 'sell', stop.amount);
                 console.error(`[Trailing Worker] ORDER BERHASIL: SELL ${stop.amount} ${stop.symbol}`);
                 executed = true;
@@ -253,7 +251,7 @@ async function startTrailingStopWorker() {
             if (currentPrice >= triggerPrice) {
               console.error(`[Trailing Worker] EXECUTED BUY untuk ID ${stop.id} di ${currentPrice} (Lowest: ${stop.lowestPrice}, Rise: ${stop.trailingPercentage}%)`);
               try {
-                const privateExchange = new ccxt.indodax({ apiKey: stop.apiKey, secret: stop.secret, enableRateLimit: true });
+                const privateExchange = new ccxt.indodax({ apiKey: API_KEY, secret: SECRET, enableRateLimit: true });
                 await privateExchange.createOrder(stop.symbol, 'market', 'buy', stop.amount);
                 console.error(`[Trailing Worker] ORDER BERHASIL: BUY ${stop.amount} ${stop.symbol}`);
                 executed = true;
