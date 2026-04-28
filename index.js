@@ -1,17 +1,19 @@
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import z from "zod";
 import ccxt from "ccxt";
 import crypto from "crypto";
-import http from "http";
 import { MongoClient, Db, Collection } from "mongodb";
 // Redirect all console logs to stderr so they don't break the MCP stdio protocol
 console.log = console.error;
 console.info = console.error;
 console.warn = console.error;
 // --- TRAILING STOP STATE MANAGEMENT (MONGODB) ---
-const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://dbRoot:luuuLzdXZXXbamnz@cluster0.x28vill.mongodb.net/?appName=Cluster0";
+const MONGO_URI = process.env.MONGO_URI || "";
 const DB_NAME = "mcp_trailing_stop_db";
+const API_KEY = process.env.API_KEY || "";
+const SECRET = process.env.SECRET || "";
 let db;
 let trailingStopsCollection;
 async function connectMongo() {
@@ -41,14 +43,12 @@ server.registerTool('indodax-ccxt', {
     inputSchema: {
         method: z.string().describe("Nama method CCXT yang ingin dipanggil (contoh: 'fetchTicker', 'fetchBalance', 'fetchOpenOrders')"),
         args: z.array(z.any()).optional().describe("Daftar argumen sesuai urutan method CCXT. Contoh untuk fetchTicker: ['BTC/IDR']"),
-        apiKey: z.string().optional().describe("API Key Indodax (wajib untuk private endpoint)"),
-        secret: z.string().optional().describe("API Secret Indodax (wajib untuk private endpoint)")
     },
-}, async ({ method, args, apiKey, secret }) => {
+}, async ({ method, args }) => {
     try {
         const exchange = new ccxt.indodax({
-            ...(apiKey ? { apiKey } : {}),
-            ...(secret ? { secret } : {}),
+            apiKey: API_KEY,
+            secret: SECRET,
             enableRateLimit: true,
             sandbox: false
         });
@@ -82,8 +82,6 @@ server.registerTool('manage_trailing_stop', {
                 amount: z.number().describe("Jumlah aset yang akan dibeli/dijual"),
                 trailingPercentage: z.number().describe("Jarak persentase trailing (contoh: 2 untuk 2%)"),
                 activationPrice: z.number().optional().describe("Harga aktivasi untuk memulai trailing (opsional, jika kosong langsung aktif)"),
-                apiKey: z.string().describe("API Key Indodax"),
-                secret: z.string().describe("Secret Key Indodax")
             })
         }),
         z.object({
@@ -111,20 +109,20 @@ server.registerTool('manage_trailing_stop', {
                 amount: payload.amount,
                 trailingPercentage: payload.trailingPercentage,
                 ...(payload.activationPrice !== undefined ? { activationPrice: payload.activationPrice } : {}),
-                apiKey: payload.apiKey,
-                secret: payload.secret,
+                apiKey: API_KEY,
+                secret: SECRET,
                 active: payload.activationPrice === undefined,
             };
             await trailingStopsCollection.insertOne(newStop);
             return {
-                content: [{ type: "text", text: `Trailing Stop berhasil dibuat dengan ID: ${id}\n\nDetail:\n${JSON.stringify({ ...newStop, apiKey: '***', secret: '***' }, null, 2)}` }]
+                content: [{ type: "text", text: `Trailing Stop berhasil dibuat dengan ID: ${id}\n\nDetail:\n${JSON.stringify({ ...newStop }, null, 2)}` }]
             };
         }
         if (action === 'list') {
             const stops = await trailingStopsCollection.find({}).toArray();
             const safeStops = stops.map(s => {
                 const { _id, ...rest } = s;
-                return { ...rest, apiKey: '***', secret: '***' };
+                return { ...rest };
             });
             return {
                 content: [{ type: "text", text: safeStops.length > 0 ? JSON.stringify(safeStops, null, 2) : "Tidak ada trailing stop aktif." }]
@@ -148,112 +146,10 @@ server.registerTool('manage_trailing_stop', {
         };
     }
 });
-let trailingWorkerRunning = false;
-async function startTrailingStopWorker() {
-    if (trailingWorkerRunning)
-        return;
-    trailingWorkerRunning = true;
-    const publicExchange = new ccxt.indodax({ enableRateLimit: true });
-    console.error("[Trailing Worker] Memulai pemantauan Trailing Stop...");
-    setInterval(async () => {
-        try {
-            if (!trailingStopsCollection)
-                return; // Menunggu koneksi DB siap
-            const stops = await trailingStopsCollection.find({}).toArray();
-            if (stops.length === 0)
-                return;
-            const symbolsToFetch = [...new Set(stops.map(s => s.symbol))];
-            const prices = {};
-            for (const symbol of symbolsToFetch) {
-                try {
-                    const ticker = await publicExchange.fetchTicker(symbol);
-                    if (ticker && ticker.last) {
-                        prices[symbol] = ticker.last;
-                    }
-                }
-                catch (e) {
-                    console.error(`[Trailing Worker] Gagal fetch ticker ${symbol}:`, e.message);
-                }
-            }
-            for (const stop of stops) {
-                const currentPrice = prices[stop.symbol];
-                if (!currentPrice)
-                    continue;
-                let executed = false;
-                let changed = false;
-                if (!stop.active && stop.activationPrice) {
-                    if ((stop.side === 'sell' && currentPrice >= stop.activationPrice) ||
-                        (stop.side === 'buy' && currentPrice <= stop.activationPrice)) {
-                        stop.active = true;
-                        console.error(`[Trailing Worker] ID ${stop.id} AKTIF pada harga ${currentPrice}`);
-                        changed = true;
-                    }
-                }
-                if (stop.active) {
-                    if (stop.side === 'sell') {
-                        if (stop.highestPrice === undefined || currentPrice > stop.highestPrice) {
-                            stop.highestPrice = currentPrice;
-                            changed = true;
-                        }
-                        const triggerPrice = stop.highestPrice * (1 - (stop.trailingPercentage / 100));
-                        if (currentPrice <= triggerPrice) {
-                            console.error(`[Trailing Worker] EXECUTED SELL untuk ID ${stop.id} di ${currentPrice} (Highest: ${stop.highestPrice}, Drop: ${stop.trailingPercentage}%)`);
-                            try {
-                                const privateExchange = new ccxt.indodax({ apiKey: stop.apiKey, secret: stop.secret, enableRateLimit: true });
-                                await privateExchange.createOrder(stop.symbol, 'market', 'sell', stop.amount);
-                                console.error(`[Trailing Worker] ORDER BERHASIL: SELL ${stop.amount} ${stop.symbol}`);
-                                executed = true;
-                                changed = true;
-                            }
-                            catch (e) {
-                                console.error(`[Trailing Worker] ORDER GAGAL SELL:`, e.message);
-                            }
-                        }
-                    }
-                    else if (stop.side === 'buy') {
-                        if (stop.lowestPrice === undefined || currentPrice < stop.lowestPrice) {
-                            stop.lowestPrice = currentPrice;
-                            changed = true;
-                        }
-                        const triggerPrice = stop.lowestPrice * (1 + (stop.trailingPercentage / 100));
-                        if (currentPrice >= triggerPrice) {
-                            console.error(`[Trailing Worker] EXECUTED BUY untuk ID ${stop.id} di ${currentPrice} (Lowest: ${stop.lowestPrice}, Rise: ${stop.trailingPercentage}%)`);
-                            try {
-                                const privateExchange = new ccxt.indodax({ apiKey: stop.apiKey, secret: stop.secret, enableRateLimit: true });
-                                await privateExchange.createOrder(stop.symbol, 'market', 'buy', stop.amount);
-                                console.error(`[Trailing Worker] ORDER BERHASIL: BUY ${stop.amount} ${stop.symbol}`);
-                                executed = true;
-                                changed = true;
-                            }
-                            catch (e) {
-                                console.error(`[Trailing Worker] ORDER GAGAL BUY:`, e.message);
-                            }
-                        }
-                    }
-                }
-                // Update database per stop order
-                if (executed) {
-                    await trailingStopsCollection.deleteOne({ id: stop.id });
-                }
-                else if (changed) {
-                    const { _id, ...updateData } = stop;
-                    await trailingStopsCollection.updateOne({ id: stop.id }, { $set: updateData });
-                }
-            }
-        }
-        catch (err) {
-            console.error("[Trailing Worker] Error in interval:", err);
-        }
-    }, 10000); // 10 detik interval pengecekan
-}
 async function main() {
     await connectMongo();
-    startTrailingStopWorker();
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    // --- Render Keep-Alive Server ---
-    const PORT = process.env.PORT || 3000;
-    http.createServer((req, res) => res.end('Bot Online!')).listen(PORT);
 }
 main();
 //# sourceMappingURL=index.js.map

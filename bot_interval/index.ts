@@ -1,3 +1,4 @@
+import "dotenv/config";
 import ccxt from "ccxt";
 import { Collection, Db, MongoClient } from "mongodb";
 
