@@ -1,7 +1,8 @@
 import "dotenv/config";
 
+import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import z from "zod";
 import ccxt from "ccxt";
 import crypto from "crypto";
@@ -37,6 +38,7 @@ interface TrailingStopConfig {
 
 async function connectMongo() {
   try {
+    console.error("=======================",MONGO_URI,"===========================");
     const client = new MongoClient(MONGO_URI);
     await client.connect();
     db = client.db(DB_NAME);
@@ -47,6 +49,7 @@ async function connectMongo() {
     console.error("[MongoDB] Terhubung ke database dengan sukses.");
   } catch (err) {
     console.error("[MongoDB] Gagal terhubung:", err);
+    throw err;
   }
 }
 // --------------------------------------
@@ -181,11 +184,39 @@ server.registerTool('manage_trailing_stop', {
 
 
 
-async function main() {
-  await connectMongo();
-  
-  const transport = new StdioServerTransport();
+const app = express();
+
+let transport: SSEServerTransport;
+
+app.get('/mcp', async (req, res) => {
+  transport = new SSEServerTransport('/message', res);
   await server.connect(transport);
+});
+
+app.post('/message', async (req, res) => {
+  if (!transport) {
+    res.status(503).send('Server not ready');
+    return;
+  }
+  await transport.handlePostMessage(req, res);
+});
+
+app.get('/', async (req, res) => {
+  res.json({status: 'ok'});
+});
+
+async function main() {
+  try {
+    await connectMongo();
+    
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.error(`[MCP] Server listening on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error(error);
+    process.exit(1);
+  }
 }
 
 main();
