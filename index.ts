@@ -1,44 +1,26 @@
-import "dotenv/config";
-
-import express from "express";
+import express, { type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import z from "zod";
 import ccxt from "ccxt";
 import crypto from "crypto";
 import { MongoClient, Db, Collection } from "mongodb";
+import type { TrailingStopConfig } from "./type.js";
+import { startTrailingStopWorker } from "./bot_interval/index.js";
+import { API_KEY, DB_NAME, MONGO_URI, SECRET } from "./const.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 // Redirect all console logs to stderr so they don't break the MCP stdio protocol
 console.log = console.error;
 console.info = console.error;
 console.warn = console.error;
 
-// --- TRAILING STOP STATE MANAGEMENT (MONGODB) ---
-const MONGO_URI = process.env.MONGO_URI || "";
-const DB_NAME = "mcp_trailing_stop_db";
-const API_KEY = process.env.API_KEY || "";
-const SECRET = process.env.SECRET || "";
-
 let db: Db;
 let trailingStopsCollection: Collection<TrailingStopConfig>;
 
-interface TrailingStopConfig {
-  id: string;
-  symbol: string;
-  side: 'buy' | 'sell';
-  amount: number;
-  trailingPercentage: number;
-  activationPrice?: number;
-  highestPrice?: number;
-  lowestPrice?: number;
-  apiKey: string;
-  secret: string;
-  active: boolean;
-}
+
 
 async function connectMongo() {
   try {
-    console.error("=======================",MONGO_URI,"===========================");
     const client = new MongoClient(MONGO_URI);
     await client.connect();
     db = client.db(DB_NAME);
@@ -186,19 +168,50 @@ server.registerTool('manage_trailing_stop', {
 
 const app = express();
 
-let transport: SSEServerTransport;
-
-app.get('/mcp', async (req, res) => {
-  transport = new SSEServerTransport('/message', res);
-  await server.connect(transport);
+// Create a single transport instance for the server
+const transport = new StreamableHTTPServerTransport({
+  sessionIdGenerator: () => crypto.randomUUID()
 });
 
-app.post('/message', async (req, res) => {
-  if (!transport) {
-    res.status(503).send('Server not ready');
-    return;
+// Route all MCP requests (GET for SSE, POST for messages) to the transport
+app.post('/mcp', async (req: Request, res: Response) => {
+  try {
+      await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    console.error('Error handling MCP request:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32603,
+          message: 'Internal server error',
+        },
+        id: null,
+      });
+    }
   }
-  await transport.handlePostMessage(req, res);
+});
+
+app.get('/mcp', async (req: Request, res: Response) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: {
+      code: -32000,
+      message: "Method not allowed."
+    },
+    id: null
+  }));
+});
+
+app.delete('/mcp', async (req: Request, res: Response) => {
+  res.writeHead(405).end(JSON.stringify({
+    jsonrpc: "2.0",
+    error: {
+      code: -32000,
+      message: "Method not allowed."
+    },
+    id: null
+  }));
 });
 
 app.get('/', async (req, res) => {
@@ -208,6 +221,10 @@ app.get('/', async (req, res) => {
 async function main() {
   try {
     await connectMongo();
+    startTrailingStopWorker(db, trailingStopsCollection);
+    
+    // Connect the MCP server to the transport (using 'as any' to bypass the exactOptionalPropertyTypes TS error)
+    await server.connect(transport as any);
     
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {

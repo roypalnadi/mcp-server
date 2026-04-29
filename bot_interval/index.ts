@@ -1,46 +1,12 @@
 import "dotenv/config";
 import ccxt from "ccxt";
 import { Collection, Db, MongoClient } from "mongodb";
-
-let db: Db;
-let trailingStopsCollection: Collection<TrailingStopConfig>;
-
-interface TrailingStopConfig {
-  id: string;
-  symbol: string;
-  side: 'buy' | 'sell';
-  amount: number;
-  trailingPercentage: number;
-  activationPrice?: number;
-  highestPrice?: number;
-  lowestPrice?: number;
-  apiKey: string;
-  secret: string;
-  active: boolean;
-}
-
-const MONGO_URI = process.env.MONGO_URI || "";
-const DB_NAME = "mcp_trailing_stop_db";
-const API_KEY = process.env.API_KEY || "";
-const SECRET = process.env.SECRET || "";
-
-async function connectMongo() {
-  try {
-    const client = new MongoClient(MONGO_URI);
-    await client.connect();
-    db = client.db(DB_NAME);
-    trailingStopsCollection = db.collection<TrailingStopConfig>("trailing_stops");
-    
-    // Pastikan index unique pada 'id'
-    await trailingStopsCollection.createIndex({ id: 1 }, { unique: true });
-    console.error("[MongoDB] Terhubung ke database dengan sukses.");
-  } catch (err) {
-    console.error("[MongoDB] Gagal terhubung:", err);
-  }
-}
+import type { TrailingStopConfig } from "../type.js";
+import { API_KEY, SECRET } from "../const.js";
 
 let trailingWorkerRunning = false;
-async function startTrailingStopWorker() {
+export async function startTrailingStopWorker(db: Db, trailingStopsCollection: Collection<TrailingStopConfig>) {
+
   if (trailingWorkerRunning) return;
   trailingWorkerRunning = true;
 
@@ -138,6 +104,3 @@ async function startTrailingStopWorker() {
     }
   }, 10000); // 10 detik interval pengecekan
 }
-
-await connectMongo();
-startTrailingStopWorker();
