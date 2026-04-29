@@ -60,6 +60,7 @@ function registerTools(server: McpServer) {
         };
       }
 
+      await exchange.loadMarkets();
       const data = await (exchange as any)[method](...(args || []));
 
       return {
