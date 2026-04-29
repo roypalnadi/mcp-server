@@ -174,9 +174,9 @@ const transport = new StreamableHTTPServerTransport({
 });
 
 // Route all MCP requests (GET for SSE, POST for messages) to the transport
-app.post('/mcp', async (req: Request, res: Response) => {
+app.use('/mcp', async (req: Request, res: Response) => {
   try {
-      await transport.handleRequest(req, res, req.body);
+      await transport.handleRequest(req, res);
   } catch (error) {
     console.error('Error handling MCP request:', error);
     if (!res.headersSent) {
@@ -192,27 +192,20 @@ app.post('/mcp', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/mcp', async (req: Request, res: Response) => {
-  res.writeHead(405).end(JSON.stringify({
-    jsonrpc: "2.0",
-    error: {
-      code: -32000,
-      message: "Method not allowed."
-    },
-    id: null
-  }));
-});
+// Restart the server when the client disconnects or errors out (e.g. reconnecting)
+// This is necessary because StreamableHTTPServerTransport and McpServer only support exactly ONE connection per instance.
+transport.onclose = () => {
+  console.error("[MCP] Transport closed. Exiting process to allow clean restart...");
+  process.exit(0);
+};
 
-app.delete('/mcp', async (req: Request, res: Response) => {
-  res.writeHead(405).end(JSON.stringify({
-    jsonrpc: "2.0",
-    error: {
-      code: -32000,
-      message: "Method not allowed."
-    },
-    id: null
-  }));
-});
+transport.onerror = (error) => {
+  console.error("[MCP] Transport error:", error);
+  if (error.message.includes("Server already initialized")) {
+    console.error("[MCP] Client attempted to reconnect. Exiting process to allow clean restart...");
+    process.exit(0);
+  }
+};
 
 app.get('/', async (req, res) => {
   res.json({status: 'ok'});
