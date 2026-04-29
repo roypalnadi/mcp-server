@@ -123,8 +123,6 @@ function registerTools(server: McpServer) {
           amount: payload.amount,
           trailingPercentage: payload.trailingPercentage,
           ...(payload.activationPrice !== undefined ? { activationPrice: payload.activationPrice } : {}),
-          apiKey: API_KEY,
-          secret: SECRET,
           active: payload.activationPrice === undefined,
         };
         

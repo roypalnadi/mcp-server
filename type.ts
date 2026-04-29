@@ -7,7 +7,5 @@ export interface TrailingStopConfig {
   activationPrice?: number;
   highestPrice?: number;
   lowestPrice?: number;
-  apiKey: string;
-  secret: string;
   active: boolean;
 }
