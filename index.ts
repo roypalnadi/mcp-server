@@ -183,7 +183,8 @@ function createMcpServer() {
 async function main() {
   try {
     await connectMongo();
-    startTrailingStopWorker(db, trailingStopsCollection);
+
+    if (process.env.RUN_INTERVAL === 'true') startTrailingStopWorker(db, trailingStopsCollection);
     
     const server = createMcpServer();
     const transport = new StdioServerTransport();
