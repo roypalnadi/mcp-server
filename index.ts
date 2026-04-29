@@ -1,13 +1,12 @@
-import express, { type Request, type Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import z from "zod";
-import ccxt from "ccxt";
 import crypto from "crypto";
 import { MongoClient, Db, Collection } from "mongodb";
 import type { TrailingStopConfig } from "./type.js";
 import { startTrailingStopWorker } from "./bot_interval/index.js";
 import { API_KEY, DB_NAME, MONGO_URI, SECRET } from "./const.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { publicMethods, privateMethods } from "./indodax.js";
 
 // Redirect all console logs to stderr so they don't break the MCP stdio protocol
 console.log = console.error;
@@ -37,38 +36,48 @@ async function connectMongo() {
 // --------------------------------------
 
 function registerTools(server: McpServer) {
-  server.registerTool('indodax-ccxt', {
-    title: 'Indodax CCXT Services',
-    description: 'Mengakses semua layanan Indodax menggunakan CCXT (Public & Private API). Contoh method: fetchTicker, fetchOrderBook, fetchBalance, dll.',
+  server.registerTool('indodax', {
+    title: 'Indodax Open API',
+    description: [
+      'Mengakses Indodax melalui Open API resmi (tanpa CCXT).',
+      '',
+      'Public methods (tidak perlu API key):',
+      '  server_time, pairs, price_increments, summaries,',
+      '  ticker, ticker_all, trades, depth, ohlc_history',
+      '',
+      'Private methods (perlu API key):',
+      '  getInfo, transHistory, trade, tradeHistory,',
+      '  openOrders, orderHistory, getOrder, getOrderByClientOrderId,',
+      '  cancelOrder, cancelByClientOrderId, withdrawFee, withdrawCoin',
+      '',
+      'Contoh params untuk ticker: { "pair_id": "btcidr" }',
+      'Contoh params untuk trade: { "pair": "btc_idr", "type": "buy", "price": 1500000000, "idr": 50000, "order_type": "limit" }',
+    ].join('\n'),
     inputSchema: {
-      method: z.string().describe("Nama method CCXT yang ingin dipanggil (contoh: 'fetchTicker', 'fetchBalance', 'fetchOpenOrders')"),
-      args: z.array(z.any()).optional().describe("Daftar argumen sesuai urutan method CCXT. Contoh untuk fetchTicker: ['BTC/IDR']"),
+      method: z.string().describe("Nama method yang ingin dipanggil, contoh: 'ticker', 'getInfo', 'trade'"),
+      params: z.record(z.string(), z.any()).optional().describe("Parameter tambahan sebagai object, contoh: { \"pair_id\": \"btcidr\" }"),
     },
-  }, async ({ method, args }) => {
+  }, async ({ method, params }) => {
     try {
-      const exchange = new ccxt.indodax({
-        apiKey: API_KEY,
-        secret: SECRET,
-        enableRateLimit: true,
-        sandbox: false
-      });
+      let data: any;
 
-      if (typeof (exchange as any)[method] !== 'function') {
+      if (method in publicMethods) {
+        data = await publicMethods[method]?.(params);
+      } else if (method in privateMethods) {
+        data = await privateMethods[method]?.(API_KEY, SECRET, params);
+      } else {
         return {
-          content: [{ type: "text", text: `Method '${method}' tidak ditemukan atau bukan sebuah fungsi pada CCXT Indodax.` }],
+          content: [{ type: "text", text: `Method '${method}' tidak ditemukan.\n\nPublic: ${Object.keys(publicMethods).join(', ')}\nPrivate: ${Object.keys(privateMethods).join(', ')}` }],
           isError: true,
         };
       }
-
-      await exchange.loadMarkets();
-      const data = await (exchange as any)[method](...(args || []));
 
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       };
     } catch (error: any) {
       return {
-        content: [{ type: "text", text: `Indodax CCXT Error: ${error.message}` }],
+        content: [{ type: "text", text: `Indodax API Error: ${error.message}` }],
         isError: true,
       };
     }
@@ -173,88 +182,16 @@ function createMcpServer() {
   return server;
 }
 
-const app = express();
-
-let currentMcp: { server: McpServer, transport: StreamableHTTPServerTransport } | null = null;
-let isInitialized = false;
-
-async function setupMcp() {
-  if (currentMcp) {
-    try {
-      await currentMcp.transport.close();
-      await currentMcp.server.close();
-    } catch (e) {
-      // Ignore errors during cleanup
-    }
-  }
-
-  const server = createMcpServer();
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => crypto.randomUUID()
-  });
-
-  await server.connect(transport as any);
-  
-  currentMcp = { server, transport };
-  isInitialized = true;
-  
-  console.error("[MCP] Instance created and connected.");
-  return currentMcp;
-}
-
-app.use(express.json());
-
-// Route all MCP requests (GET for SSE, POST for messages) to the transport
-app.use('/mcp', async (req: Request, res: Response) => {
-  try {
-    // Detect initialize request to reset the singleton if needed
-    const isInitialize = req.method === 'POST' && (
-      Array.isArray(req.body) 
-      ? req.body.some((m: any) => m.method === 'initialize')
-      : req.body?.method === 'initialize'
-    );
-
-    if (isInitialize && isInitialized) {
-      console.error("[MCP] Re-initializing for new connection...");
-      await setupMcp();
-    } else if (!currentMcp) {
-      await setupMcp();
-    }
-
-    if (currentMcp) {
-      await currentMcp.transport.handleRequest(req, res, req.body);
-    }
-  } catch (error) {
-    console.error('Error handling MCP request:', error);
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal server error',
-        },
-        id: null,
-      });
-    }
-  }
-});
-
-app.get('/', async (req, res) => {
-  res.json({status: 'ok'});
-});
-
 async function main() {
   try {
     await connectMongo();
     startTrailingStopWorker(db, trailingStopsCollection);
     
-    // Initial setup will happen on first request or here
-    await setupMcp();
+    const server = createMcpServer();
+    const transport = new StdioServerTransport();
     
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-      console.error(`[MCP] Server listening on port ${PORT}`);
-    });
+    await server.connect(transport);
+    console.error("[MCP] Server running on stdio");
   } catch (error) {
     console.error(error);
     process.exit(1);
