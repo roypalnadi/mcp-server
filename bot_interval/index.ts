@@ -45,7 +45,7 @@ export async function startTrailingStopWorker(db: Db, trailingStopsCollection: C
         // Cek aktivasi
         if (!stop.active && stop.activationPrice) {
           if ((stop.side === 'sell' && currentPrice >= stop.activationPrice) ||
-              (stop.side === 'buy' && currentPrice <= stop.activationPrice)) {
+            (stop.side === 'buy' && currentPrice <= stop.activationPrice)) {
             stop.active = true;
             console.error(`[Trailing Worker] ID ${stop.id} AKTIF pada harga ${currentPrice}`);
             changed = true;
@@ -59,26 +59,32 @@ export async function startTrailingStopWorker(db: Db, trailingStopsCollection: C
               stop.highestPrice = currentPrice;
               changed = true;
             }
-            
+
             // Hitung trigger sell
             const triggerPrice = stop.highestPrice * (1 - (stop.trailingPercentage / 100));
             if (currentPrice <= triggerPrice) {
               console.error(`[Trailing Worker] EXECUTED SELL untuk ID ${stop.id} di ${currentPrice} (Highest: ${stop.highestPrice}, Drop: ${stop.trailingPercentage}%)`);
+              const coin = stop.symbol.split('_')[0]?.toLowerCase();
               try {
                 // Indodax native trade: sell market menggunakan btc (jumlah coin)
-                const coin = stop.symbol.split('_')[0]?.toLowerCase();
                 if (coin) {
                   await privateMethods.trade?.(API_KEY, SECRET, {
                     pair: stop.symbol,
                     type: 'sell',
                     order_type: 'market',
-                    [coin]: stop.amount 
+                    [coin]: stop.amount
                   });
                   console.error(`[Trailing Worker] ORDER BERHASIL: SELL ${stop.amount} ${stop.symbol}`);
                   executed = true;
                   changed = true;
                 }
               } catch (e: any) {
+                console.error(`[Trailing Worker] PAYLOAD:`, {
+                  pair: stop.symbol,
+                  type: 'sell',
+                  order_type: 'market',
+                  [coin ?? 'error']: stop.amount
+                });
                 console.error(`[Trailing Worker] ORDER GAGAL SELL:`, e.message);
               }
             }
@@ -88,7 +94,7 @@ export async function startTrailingStopWorker(db: Db, trailingStopsCollection: C
               stop.lowestPrice = currentPrice;
               changed = true;
             }
-            
+
             // Hitung trigger buy
             const triggerPrice = stop.lowestPrice * (1 + (stop.trailingPercentage / 100));
             if (currentPrice >= triggerPrice) {
@@ -99,7 +105,7 @@ export async function startTrailingStopWorker(db: Db, trailingStopsCollection: C
                   pair: stop.symbol,
                   type: 'buy',
                   order_type: 'market',
-                  idr: stop.amount 
+                  idr: stop.amount
                 });
                 console.error(`[Trailing Worker] ORDER BERHASIL: BUY dengan IDR ${stop.amount} pada ${stop.symbol}`);
                 executed = true;
